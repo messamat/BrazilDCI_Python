@@ -10,6 +10,8 @@ from collections import defaultdict
 arcpy.CheckOutExtension("Spatial")
 arcpy.env.overwriteOutput = True
 arcpy.env.qualifiedFieldNames = True
+arcpy.env.XYResolution = "0.001 meters"
+arcpy.env.XYTolerance = "0.001 meters"
 
 #Input data and variables
 rootdir = 'F:/Mathis/brazilDCI'
@@ -26,6 +28,7 @@ br_bound = os.path.join(resdir, "br_boundaries.shp")
 dcigdb = os.path.join(resdir, 'dci.gdb')
 if not os.path.exists(dcigdb):
     arcpy.CreateFileGDB_management(resdir, 'dci')
+edit = arcpy.da.Editor(dcigdb)
 snbr_original = os.path.join(dcigdb, 'streamATLAS_Brazil')
 netftdat = os.path.join(dcigdb, 'streamATLAS_geonetwork')
 snbr_proj =  os.path.join(netftdat,'streamATLAS_Brazil_proj')
@@ -53,6 +56,13 @@ damsnap_join = os.path.join(dcigdb, 'damfull_join')
 
 outsnsplit = os.path.join(netftdat, 'streamATLAS_split')
 geonetout = os.path.join(netftdat,'streamATLAS_geonet')
+
+netp = os.path.join(dcigdb, 'netpointstart')
+netendp = os.path.join(dcigdb, 'netpointend')
+net_diss = os.path.join(dcigdb, 'netproj_diss')
+
+dam_tab = os.path.join(dcigdb, 'damattributes')
+netseg_tab = os.path.join(dcigdb, 'networkattributes')
 
 ########################################################################################################################
 # GENERAL DATA PRE-FORMATTING
@@ -92,7 +102,6 @@ for level in blevels:
                                                invert_spatial_relationship='INVERT')
         arcpy.CopyFeatures_management('basinnocoastlyr', basinnocoast)
         arcpy.Project_management(basinnocoast, basinnocoastproj, crsSIRGAS)
-
 
 #---- 2. Subset StreamATLAS based on level 4 basins that intersect Brazil ----
 arcpy.Clip_analysis(streamatlas, basinbr4, snbr_original)
@@ -240,7 +249,6 @@ if not arcpy.Exists(netftdat):
 #arcpy.Describe(netftdat).SpatialReference.XYTolerance
 
 #For each level
-edit = arcpy.da.Editor(dcigdb)
 for level in blevels:
     #Intersect stream reaches with basins at multiple levels, leading to some reaches being divided in multiple segments
     basinnocoast = os.path.join(dcigdb, "BasinATLAS_lev{}_v01_br_NonCoastalproj".format(level))
@@ -275,10 +283,6 @@ if not arcpy.Exists(outsnsplit):
     arcpy.SplitLineAtPoint_management(snbr_clean, damsnap_edit, outsnsplit, search_radius= '0.1 Meters')
 
 #-------------- Edit dams that fall on the start node (upstream edge) of 1st order streams ------------------------------------------
-#Spatial join dams to network to get SUBREACH_ID
-arcpy.SpatialJoin_analysis(damsnap_edit, outsnsplit, damsnap_join, join_operation='JOIN_ONE_TO_ONE',
-                           match_option = 'INTERSECT', search_radius = '0.01 meters')
-
 #Find dangle points
 arcpy.FeatureVerticesToPoints_management(outsnsplit, '{}_vertices'.format(outsnsplit), point_location= 'DANGLE')
 
@@ -313,7 +317,7 @@ with arcpy.da.UpdateCursor(damsnap_edit, ['DAMID', 'SHAPE@XY']) as cursor:
 #----------------------------- Split network at dams again -------------------------------------
 if not arcpy.Exists(outsnsplit):
     print('Split stream segments where dams intersect them...')
-    arcpy.SplitLineAtPoint_management(snbr_clean, damsnap_edit, outsnsplit, search_radius= '0.1 Meters')
+    arcpy.SplitLineAtPoint_management(snbr_clean, damsnap_edit, outsnsplit, search_radius= '0.001 Meters')
 
 #Create new unique id for each segment in network
 outfield = 'SUBREACH_ID'
@@ -349,130 +353,116 @@ else:
 ########################################################################################################################
 # DCI ANALYSIS
 ########################################################################################################################
-[f.name for f in arcpy.ListFields(outsnsplit)]
-
-
-#Start with subset of netproj 10
-netsub = os.path.join(netftdat, 'netproj_sub')
-arcpy.MakeFeatureLayer_management(outsnsplit, 'netproj_lyr', where_clause='HYBAS_ID04 = 6040814830')
-#arcpy.GetCount_management('netproj10_lyr')
-arcpy.CopyFeatures_management('netproj_lyr', netsub)
-
-arcpy.CreateGeometricNetwork_management(netftdat, 'netsubgeo',
-                                        in_source_feature_classes = "{} SIMPLE_EDGE NO".format(os.path.split(netsub)[1]))
-netsubgeo = os.path.join(netftdat, 'netsubgeo')
-
-#Select subset of dams
-arcpy.MakeFeatureLayer_management(os.path.join(datadir, "HydroATLAS/BasinATLAS_v01.gdb/BasinATLAS_lev04_v01"),
-                                  'basinlyr', 'HYBAS_ID = 6040814830')
-arcpy.MakeFeatureLayer_management(damsnap_edit, 'damsublyr')
-arcpy.SelectLayerByLocation_management('damsublyr', 'WITHIN', 'basinlyr', selection_type='NEW_SELECTION')
-
 #Set flow direction of geometric network, a pre-requisite for tracing
-arcpy.SetFlowDirection_management(netsubgeo, flow_option = "WITH_DIGITIZED_DIRECTION")
+arcpy.SetFlowDirection_management(geonetout, flow_option = "WITH_DIGITIZED_DIRECTION")
 
-############################## TO CONTINUE
 #For each segment, identify connected reaches with dams as barriers
-netsubp = os.path.join(dcigdb, 'netsubpoint')
 #Get start point of each reach
-arcpy.FeatureVerticesToPoints_management(netsub, netsubp, point_location='START')
+arcpy.FeatureVerticesToPoints_management(outsnsplit, netp, point_location='START')
 segdic = defaultdict(list) #dictionary to contain segment ID as key and SUBREACH_ID of corresponding reaches as values
 #Iterate over each reach
-with arcpy.da.SearchCursor(netsubp, ['SUBREACH_ID', 'SHAPE@']) as cursor:
+print('Find connected reaches...')
+#################### EDIT TO DO: WRITE DIRECTLY DIC WITH KEYS AS SUBREACH_id AND VALUE AS SEGID
+with arcpy.da.SearchCursor(netp, ['SUBREACH_ID', 'SHAPE@']) as cursor:
     i=0
     for row in cursor:
         if row[0] not in set(itertools.chain.from_iterable(segdic.values())): #If reach not already part of a segment
             print(i)
-            #Select all connected reaches using dams a barriers
-            tracelyr = arcpy.TraceGeometricNetwork_management(in_geometric_network= netsubgeo,
-                                                              out_network_layer = "connectlyr",
-                                                              in_flags = row[1], in_barriers='damsublyr',
-                                                              in_trace_task_type= "FIND_CONNECTED")
-            connect_tr = "connectlyr/{}".format(os.path.split(netsub)[1])
+            #Select all connected reaches using dams a barriers (this includes stopping reaches where dam is though)
+            arcpy.TraceGeometricNetwork_management(in_geometric_network= geonetout,
+                                                   out_network_layer = "connectlyr",
+                                                   in_flags = row[1], in_barriers= damsnap_edit,
+                                                   in_trace_task_type= "FIND_CONNECTED",
+                                                   in_trace_ends = 'NO_TRACE_ENDS')
+            connect_tr = "connectlyr/{}".format(os.path.split(outsnsplit)[1])
+
+            #Add reaches with barriers on them that are connected
+            arcpy.TraceGeometricNetwork_management(in_geometric_network= geonetout,
+                                                   out_network_layer = "connectstoplyr",
+                                                   in_flags = row[1], in_barriers=damsnap_edit,
+                                                   in_trace_task_type= "FIND_CONNECTED",
+                                                   in_trace_ends = 'TRACE_ENDS')
+            connectstop_tr = "connectstoplyr/{}".format(os.path.split(outsnsplit)[1])
+
             #Populate dictionary with SUBREACH_ID for that segment ID
             with arcpy.da.SearchCursor(connect_tr, ["SUBREACH_ID"]) as cursor_connect:
                 for row_connect in cursor_connect:
                     segdic[i].append(row_connect[0])
+            with arcpy.da.SearchCursor(connectstop_tr, ["SUBREACH_ID"]) as cursor_connectstop:
+                for row_connectstop in cursor_connectstop:
+                    segdic[i].append(row_connectstop[0])
+
+            #Check if the segment is empty (sometimes happens for single reaches between two dams) and fill it in with the corresponding reach
+            if len(segdic[i]) == 0:
+                countout = arcpy.GetCount_management("connectstoplyr/{}_Junctions".format(os.path.split(geonetout)[1]))
+                if int(countout.getOutput(0)) == 1:
+                    print('Assign SEGID {0} to reach {1}'.format(i, row[0]))
+                    segdic[i].append(row[0])
             i+=1
 
+#Reverse dictionary to assign a segment ID to each reach
+invsegdic = {v: k for k, vall in segdic.iteritems() for v in vall}
 
+# #In case one wants to save dictionary to file
+# import cPickle as pickle
+# outpickle = os.path.join(resdir, 'invsegdic')
+# pickle.dump(invsegdic, open(outpickle, "wb" ) )
+# invsegdic = pickle.load(open(outpickle, "rb" ) )
 
-
-
-
-
-#Identify first downstream dam
-#Assign same SEGID to all subreaches that share the same immediate downstream dam
-
-##################### IDENTIFY ALL UPSTREAM DOWN###############
-#Create a list of ComID that dams sit on
-dams_comid = []
-with arcpy.da.SearchCursor(dams_rout, ["FLComID"]) as cursor_d:
-    for row_d in cursor_d:
-        dams_comid.append(row_d[0])
-
-
-
-#Add
-
-
-################################################### HAS NOT BEEN TESTED YET ########################################################
-#Iterate through gages
-gages_sel = "gagetrim50k_o10y_netjoin"
-
-arcpy.MakeFeatureLayer_management(gages_sel, "gage_sel_lyr")
-gage_up_dic = defaultdict(list)
-fields = arcpy.ListFields(gages_sel)
-for f in fields:
-    print f.name
-#Iterate through gages (as the "TraceGeometricNetwork" tool does not allow for a tolerance parameter, be aware of the XY
-## tolerance of the feature dataset containing your geometric network
-#As gages being further than that tolerance will bring up "001191: No flag found from the flag junction feature class."
-
-with arcpy.da.SearchCursor(gages_sel, ["site_no"]) as cursor:
+#Assign segment ID to each reach in network
+print('Assign segment ID to reach reach...')
+if 'SEGID' not in [f.name for f in arcpy.ListFields(outsnsplit)]:
+    arcpy.AddField_management(outsnsplit, 'SEGID', 'LONG')
+edit.startEditing(False, True)
+with arcpy.da.UpdateCursor(outsnsplit, ['SUBREACH_ID', 'SEGID']) as cursor:
     for row in cursor:
-        #Print gage ID
-        print row[0]
-        expr = '"site_no" = ' + "'%s'" %row[0]
-        #Select gage one by one based on gage ID
-        arcpy.SelectLayerByAttribute_management("gage_sel_lyr", "NEW_SELECTION", expr)
-        #Select all features in geometric network upstream of gage
-        up_tr = "up_trace_lyr/NHDFlowline_Network_nocoast2"
-        #Iterate through each reach upstream of gage
-        with arcpy.da.SearchCursor(up_tr, ["ComID"]) as cursor_up:
-            for row_up in cursor_up:
-                #Check whether ComID corresponds to ComID in the dam database
-                if row_up[0] in dams_comid:
-                    ##Makes sure that this ComID is not already in the dictionary for that gage (in the case of two dams being on the same reach)
-                    if row[0] in gage_up_dic:
-                        if row_up[0] not in gage_up_dic.get(row[0]):
-                            #Write ComID to dictionary with the selected gage's ID as key and the reach with a dam's ComID as a value
-                            gage_up_dic[row[0]].append(row_up[0])
-                    else:
-                        gage_up_dic[row[0]].append(row_up[0])
-        #arcpy.CopyFeatures_management("up_trace_lyr/NHDFlowline_Network", "F:\Miscellaneous\Julian_Streamsites_gages\Gage_Dam_Pairing_uptrace.gdb\\up_%s" %(row[0]))
-        #Delete temporary trace layer
-        arcpy.Delete_management("up_trace_lyr")
-arcpy.Delete_management("gage_sel_lyr")
+        try:
+            row[1] = invsegdic[row[0]]
+            cursor.updateRow(row)
+        except:
+            print('{} not in list of reaches'.format(row[0]))
+edit.stopEditing(True)
 
-gage_up_dic_copy = gage_up_dic
-#Write out a csv file with a row for each pair of gage-reach with a dam
-uptab = "F:\Miscellaneous\Julian_Streamsites_gages\gage_up_dic_25_20181204.csv"
+#Dissolve based on SEGID and HYBAS_ID08
+print('Dissolve network based on segment ID and basin ID...')
+arcpy.Dissolve_management(outsnsplit, net_diss, dissolve_field = ['HYBAS_ID08', 'SEGID'])
 
-with open(uptab, "wb") as csv_file:
-    writer = csv.writer(csv_file)
-    #Write headers
-    writer.writerow(["SOURCE_FEA", "ComID_Dam"])
-    for key in gage_up_dic.keys():
-        for value in gage_up_dic[key]:
-            writer.writerow([str(key),value])
+#Link dams with upstream and downstream reach thanks to last and first point of SHAPE@ (use int(shape.X) and Y to deal with points sometimes being a few cm off)
+print('Identify upstream and downstream segment for every dam...')
+arcpy.FeatureVerticesToPoints_management(net_diss, netendp, point_location='END')
+lastpdict = defaultdict(list)
+for row in arcpy.da.SearchCursor(netendp, ['SHAPE@', 'SEGID']):
+    lastpdict[(round(row[0].centroid.X, 1), round(row[0].centroid.Y, 1))].append(row[1])
 
-#Identify all downstream dams
+firstpdict = defaultdict(list)
+for row in arcpy.da.SearchCursor(netp, ['SHAPE@', 'SUBREACH_ID']):
+    firstpdict[(round(row[0].centroid.X, 1), round(row[0].centroid.Y, 1))].append(invsegdic[row[1]])
 
-#Continuous subnetworks are those that are:
-#1. in same basin
-#2. same nearest downstream dam
+damfieldlist = [f.name for f in arcpy.ListFields(damsnap_edit)]
+if 'UpSeg' not in damfieldlist:
+    arcpy.AddField_management(damsnap_edit, 'UpSeg', 'LONG')
+if 'downSeg' not in damfieldlist:
+    arcpy.AddField_management(damsnap_edit, 'DownSeg', 'LONG')
 
+with arcpy.da.UpdateCursor(damsnap_edit, ['SHAPE@', 'DownSeg', 'UpSeg', 'DAMID']) as cursor:
+    for row in cursor:
+        rowp = (round(row[0].centroid.X, 1), round(row[0].centroid.Y, 1))
+        if rowp in firstpdict.keys():
+            row[1] = firstpdict[rowp][0]
+        if rowp in lastpdict.keys():
+            for p in lastpdict[rowp]: #Deal with bug when downsegment has an end point overlapping with that of the upsegment (not sure why)
+                if p != firstpdict[rowp][0]:
+                    row[2] = p
+        cursor.updateRow(row)
+
+#Get HYBASID_08
+#Spatial join dams to network to get SUBREACH_ID
+arcpy.SpatialJoin_analysis(damsnap_edit, outsnsplit, damsnap_join, join_operation='JOIN_ONE_TO_ONE',
+                           match_option = 'INTERSECT', search_radius = '0.001 meters')
+
+#Export dam and network attributes to tables
+arcpy.CopyRows_management(damsnap_join, dam_tab)
+arcpy.CopyRows_management(net_diss, netseg_tab)
 
 ########################################################################################################################
 # EXTRA STUFF BY MATHIS
