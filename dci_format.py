@@ -29,6 +29,7 @@ dcigdb = os.path.join(resdir, 'dci.gdb')
 if not os.path.exists(dcigdb):
     arcpy.CreateFileGDB_management(resdir, 'dci')
 edit = arcpy.da.Editor(dcigdb)
+
 snbr_original = os.path.join(dcigdb, 'streamATLAS_Brazil')
 netftdat = os.path.join(dcigdb, 'streamATLAS_geonetwork')
 snbr_proj =  os.path.join(netftdat,'streamATLAS_Brazil_proj')
@@ -59,6 +60,7 @@ geonetout = os.path.join(netftdat,'streamATLAS_geonet')
 
 netp = os.path.join(dcigdb, 'netpointstart')
 netendp = os.path.join(dcigdb, 'netpointend')
+netdanglep = os.path.join(dcigdb, 'netpointdangle')
 net_diss = os.path.join(dcigdb, 'netproj_diss')
 
 dam_tab = os.path.join(dcigdb, 'damattributes')
@@ -362,7 +364,7 @@ arcpy.FeatureVerticesToPoints_management(outsnsplit, netp, point_location='START
 segdic = defaultdict(list) #dictionary to contain segment ID as key and SUBREACH_ID of corresponding reaches as values
 #Iterate over each reach
 print('Find connected reaches...')
-#################### EDIT TO DO: WRITE DIRECTLY DIC WITH KEYS AS SUBREACH_id AND VALUE AS SEGID
+#################### FUTURE EDIT TO DO: WRITE DIRECTLY DIC WITH KEYS AS SUBREACH_id AND VALUE AS SEGID TO MAKE IT FASTER - FINE FOR NOW
 with arcpy.da.SearchCursor(netp, ['SUBREACH_ID', 'SHAPE@']) as cursor:
     i=0
     for row in cursor:
@@ -403,7 +405,7 @@ with arcpy.da.SearchCursor(netp, ['SUBREACH_ID', 'SHAPE@']) as cursor:
 #Reverse dictionary to assign a segment ID to each reach
 invsegdic = {v: k for k, vall in segdic.iteritems() for v in vall}
 
-# #In case one wants to save dictionary to file
+# #### In case one wants to save dictionary to file
 # import cPickle as pickle
 # outpickle = os.path.join(resdir, 'invsegdic')
 # pickle.dump(invsegdic, open(outpickle, "wb" ) )
@@ -423,39 +425,59 @@ with arcpy.da.UpdateCursor(outsnsplit, ['SUBREACH_ID', 'SEGID']) as cursor:
             print('{} not in list of reaches'.format(row[0]))
 edit.stopEditing(True)
 
-#Dissolve based on SEGID and HYBAS_ID08
+#Dissolve based on SEGID and HYBAS_ID08 (to get at higher or lower level of basins HYBAS_ID06, or HYBAS_ID10, dissolve by these fields)
 print('Dissolve network based on segment ID and basin ID...')
 arcpy.Dissolve_management(outsnsplit, net_diss, dissolve_field = ['HYBAS_ID08', 'SEGID'])
 
 #Link dams with upstream and downstream reach thanks to last and first point of SHAPE@ (use int(shape.X) and Y to deal with points sometimes being a few cm off)
 print('Identify upstream and downstream segment for every dam...')
+arcpy.FeatureVerticesToPoints_management(net_diss, netdanglep, point_location='DANGLE')
 arcpy.FeatureVerticesToPoints_management(net_diss, netendp, point_location='END')
+
+#Dictionary containing rounded coordinates and corresponding SEGID for start vertex of every segment (to identify downstream segments)
+
+########
+#Future edit: Exclude dangle points to avoid errors when dams are too close to the start vertex of first order stream (e.g. D1430 Ipueiras)
+#However, issues of resolution/tolerance made a point lower down a dangle in this case. Not sure how to solve. Correct manually in R code
+#danglepset = {(round(row[0].centroid.X, 1), round(row[0].centroid.Y, 1)) for row in arcpy.da.SearchCursor(netdanglep, ['SHAPE@'])}
+####
+
+firstpdict = defaultdict(list)
+for row in arcpy.da.SearchCursor(netp, ['SHAPE@', 'SUBREACH_ID']):
+    outcoor = (round(row[0].centroid.X, 1), round(row[0].centroid.Y, 1))
+    #if outcoor not in danglepset:
+    firstpdict[outcoor].append(invsegdic[row[1]])
+
+#Dictionary containing rounded coordinates and corresponding SEGID for end vertex of every segment (to identify upstream segments)
 lastpdict = defaultdict(list)
 for row in arcpy.da.SearchCursor(netendp, ['SHAPE@', 'SEGID']):
     lastpdict[(round(row[0].centroid.X, 1), round(row[0].centroid.Y, 1))].append(row[1])
 
-firstpdict = defaultdict(list)
-for row in arcpy.da.SearchCursor(netp, ['SHAPE@', 'SUBREACH_ID']):
-    firstpdict[(round(row[0].centroid.X, 1), round(row[0].centroid.Y, 1))].append(invsegdic[row[1]])
-
+#Create UpSeg and DownSeg fields
 damfieldlist = [f.name for f in arcpy.ListFields(damsnap_edit)]
 if 'UpSeg' not in damfieldlist:
     arcpy.AddField_management(damsnap_edit, 'UpSeg', 'LONG')
 if 'downSeg' not in damfieldlist:
     arcpy.AddField_management(damsnap_edit, 'DownSeg', 'LONG')
 
+#Assign UpSeg and DownSeg for each dam by overlapping it with start and end vertices
+#Manual corrections that can be improved upon automatically in later edits
+bugdictstart = {}
+bugdictstart['D1430'] = 1779
+
 with arcpy.da.UpdateCursor(damsnap_edit, ['SHAPE@', 'DownSeg', 'UpSeg', 'DAMID']) as cursor:
     for row in cursor:
         rowp = (round(row[0].centroid.X, 1), round(row[0].centroid.Y, 1))
         if rowp in firstpdict.keys():
             row[1] = firstpdict[rowp][0]
+        if row[3] in bugdictstart: #If known glitch
+            row[1] = bugdictstart[row[3]]
         if rowp in lastpdict.keys():
             for p in lastpdict[rowp]: #Deal with bug when downsegment has an end point overlapping with that of the upsegment (not sure why)
                 if p != firstpdict[rowp][0]:
                     row[2] = p
         cursor.updateRow(row)
 
-#Get HYBASID_08
 #Spatial join dams to network to get SUBREACH_ID
 arcpy.SpatialJoin_analysis(damsnap_edit, outsnsplit, damsnap_join, join_operation='JOIN_ONE_TO_ONE',
                            match_option = 'INTERSECT', search_radius = '0.001 meters')
