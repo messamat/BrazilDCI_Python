@@ -53,6 +53,7 @@ damsbufinter = os.path.join(dcigdb, 'damsbufinter')
 damsel = os.path.join(dcigdb, 'damfull_simplified_300m')
 damsnap = os.path.join(dcigdb, 'damfull_snapped')
 damsnap_edit = os.path.join(dcigdb, 'damfull_snappededit')
+damsnap_editclean = os.path.join(dcigdb, 'damfull_snappededitclean')
 damsnap_join = os.path.join(dcigdb, 'damfull_join')
 
 outsnsplit = os.path.join(netftdat, 'streamATLAS_split')
@@ -76,10 +77,11 @@ arcpy.Merge_management(glob.glob(os.path.join(datadir, 'NGA/*/cd*.shp')), ngacoa
 arcpy.Dissolve_management(br_admin, br_bound)
 
 for level in blevels:
-    #---- 1. Filter basins and rivers of Brazil ----
+    #---- Filter basins and rivers of Brazil ----
     basin = os.path.join(datadir, "HydroATLAS/BasinATLAS_v01.gdb/BasinATLAS_lev{}_v01".format(level))
     basinbr = os.path.join(dcigdb, "{}_br".format(os.path.split(basin)[1]))
     basinbrinter = os.path.join(dcigdb, "{}_brinter".format(os.path.split(basin)[1]))
+    basinbrproj = basinbr + 'proj'
     if not arcpy.Exists(basinbr):
         print('Filter BasinATLAS for Brazil for level {}...'.format(level))
         if not 'AREA_GEOFULL' in [f.name for f in arcpy.ListFields(basin)]:
@@ -87,35 +89,35 @@ for level in blevels:
             arcpy.AlterField_management(basin, 'AREA_GEO', new_field_name='AREA_GEOFULL', new_field_alias = 'AREA_GEOFULL')
         arcpy.Intersect_analysis([basin, br_bound], basinbrinter)
         arcpy.AddGeometryAttributes_management(basinbrinter, 'AREA_GEODESIC', Area_Unit = 'SQUARE_KILOMETERS')
+        #Only keep basins that have at least 1% of their area within Brazil
         arcpy.MakeFeatureLayer_management(basinbrinter, 'basinbrinterlyr',
                                           where_clause= '(AREA_GEO/AREA_GEOFULL) > 0.01')
-        basinbr4list = [row[0] for row in arcpy.da.SearchCursor('basinbrinterlyr', ['HYBAS_ID'])]
-        arcpy.MakeFeatureLayer_management(basin, 'basinbr4lyr',
-                                          where_clause= 'HYBAS_ID IN {}'.format(tuple(basinbr4list)))
-        arcpy.CopyFeatures_management('basinbr4lyr', basinbr)
+        basinbrlist = [row[0] for row in arcpy.da.SearchCursor('basinbrinterlyr', ['HYBAS_ID'])]
+        arcpy.MakeFeatureLayer_management(basin, 'basinbrlyr', where_clause= 'HYBAS_ID IN {}'.format(tuple(basinbrlist)))
+        arcpy.CopyFeatures_management('basinbrlyr', basinbr)
 
-    #---- 4. Create a shapefile removing coastal drainages and project basins----
-    basinnocoast =  os.path.join(dcigdb, "{}_NonCoastal".format(basinbr))
-    basinnocoastproj = os.path.join(dcigdb, "{}proj".format(basinnocoast))
-    if not arcpy.Exists(basinnocoastproj):
-        print('Remove coastal drainages from BasinATLAS for level {}...'.format(level))
-        arcpy.MakeFeatureLayer_management(basinbr, 'basinnocoastlyr')
-        arcpy.SelectLayerByLocation_management('basinnocoastlyr', 'INTERSECT', ngacoast,
-                                               invert_spatial_relationship='INVERT')
-        arcpy.CopyFeatures_management('basinnocoastlyr', basinnocoast)
-        arcpy.Project_management(basinnocoast, basinnocoastproj, crsSIRGAS)
+        #Subset StreamATLAS based on level 4 basins that intersect Brazil ----
+        if level == '04':
+            arcpy.Clip_analysis(streamatlas, 'basinbrlyr', snbr_original)
 
-#---- 2. Subset StreamATLAS based on level 4 basins that intersect Brazil ----
-arcpy.Clip_analysis(streamatlas, basinbr4, snbr_original)
+        #Project basins
+        arcpy.Project_management(basinbr, basinbrproj, crsSIRGAS)
 
-#---- 3. Create a shapefile only for dams in operation ----
+#---- Remove suspended and non-licensed dams ----
+arcpy.MakeFeatureLayer_management(dams_original, 'dams_sublyr')
+arcpy.SelectLayerByAttribute_management('dams_sublyr', 'NEW_SELECTION', where_clause= "NOT {0} IN ('Desativado' , 'Revogado', 'Extinta')".format('"ESTAGIO_1"'))
 
-
-#-----5. Clean and project river network + project dams ----
+#-----Clean and project river network + project dams ----
 #Identify and remove the bugs in the streamATLAS network
 #Project dam dataset and import it into gdb
 if not arcpy.Exists(dams_originalgdb):
-    arcpy.Project_management(dams_original, dams_originalgdb, crsSIRGAS)
+    arcpy.Project_management('dams_sublyr', dams_originalgdb, crsSIRGAS)
+
+#Create feature dataset
+#pr.XYTolerance = 0.01
+if not arcpy.Exists(netftdat):
+    arcpy.CreateFeatureDataset_management(dcigdb, os.path.split(netftdat)[1], crsSIRGAS) #pr
+#arcpy.Describe(netftdat).SpatialReference.XYTolerance
 
 #Project network and import into feature dataset
 arcpy.Project_management(snbr_original, snbr_proj, crsSIRGAS)
@@ -222,104 +224,100 @@ arcpy.CopyFeatures_management(damsel, damsnap)
 arcpy.Near_analysis(damsnap, snbr_clean, location = 'LOCATION', angle = 'NO_ANGLE')
 
 #Snap
-snap_env = [snbr_clean, "EDGE", "500 Meters"]
+snap_env = [snbr_clean, "EDGE", "200 Meters"]
 arcpy.Snap_edit(damsnap, [snap_env])
 
-#Check those dams > 500 m from river network with imagery. Either move them to the network or delete them.
-#Create field to know whether dam was checked (0) or edited (1), otherwise 'null'
-arcpy.CopyFeatures_management(damsnap, damsnap_edit)
-arcpy.AddField_management(damsnap_edit, 'manualsnap', 'TEXT')
-damdel = {} #list of dams to delete
-#Delete dams
-with arcpy.da.UpdateCursor(damsnap_edit, [arcpy.Describe(damsel).OIDFieldName]) as cursor:
-    for row in cursor:
-        if row[0] in damdel:
-            cursor.deleteRow()
+#Compare dam size with modelled discharge of stream it was snapped to
+arcpy.SpatialJoin_analysis(damsnap, streamatlas, damsnap_edit, join_operation= 'JOIN_ONE_TO_ONE',
+                           join_type = 'KEEP_ALL', match_option = 'INTERSECT', search_radius = '10 meters')
+arcpy.AddField_management(damsnap_edit, 'KWTOQ', 'FLOAT')
+arcpy.CalculateField_management(damsnap_edit, 'KWTOQ', '!POT_KW!/!dis_m3_pyr!', expression_type= 'PYTHON')
 
-#For now, delete all those < 500 m, refine later
-arcpy.MakeFeatureLayer_management(damsnap, 'damsnaplyr', where_clause='NEAR_DIST < 500')
-arcpy.CopyFeatures_management('damsnaplyr', damsnap_edit)
+#Check those dams 200-500 m from river network with imagery and water mask, large hydropower (Tipo_1 = UHE), and those with high/low KWTOQ.
+#Either move them to the network or delete them.
+#Create field to know whether dam was checked and edited (1) or not edited (0), otherwise (if not checked) 'null'
+arcpy.AddField_management(damsnap_edit, 'manualsnap', 'TEXT')
+arcpy.AddField_management(damsnap_edit, 'comment', 'TEXT')
+
+#For large KWTOQ ratio (> 1000 electricty production (KW)/ annual average discharge (m3/s), 500 dams:
+    #Make sure that dam wasn't snapped to smaller tributary
+    #For KWTOQ > > 5000: Check that river name matches and that if in operation, could see reservoir or station.
+    # Looked for comments (e.g. incorrect coordinates)
+#For small KWTOQ ratio (< 10):
+    #Make sure that small dams didn't get snapped to large rivers. did not find any anomaly. Could also be typos in production capacity.
+#For dams 200-500 m (766 dams), manually inspect and snap either:
+    #  already in operation and reasonable certainty that reservoir or diversion exists and/or original point sits on top of watercourse in imagery and/or brazilian hydrography
+    #  original point sits on top of watercourse in imagery and/or brazilian hydrography
+    # when in doubt, make sure that river name matches
+#Check every dam > 30000 KW
+
+#Make a copy of damsnap_edit to avoid deleting by mistake
+arcpy.CopyFeatures_management(damsnap_edit, os.path.join(datadir, damsnap_edit + 'copy'))
+
+#Re-snap (to make sure that manual edits are properly intersecting network) and delete dams
+arcpy.CopyFeatures_management(damsnap_edit, damsnap_editclean)
+arcpy.Snap_edit(damsnap_editclean, [snap_env])
+with arcpy.da.UpdateCursor(damsnap_editclean, ['manualsnap', 'DAMID']) as cursor:
+    for row in cursor:
+        if row[0]== '-1':
+            print('Delete {}'.format(row[1]))
+            cursor.deleteRow()
 
 ########################################################################################################################
 # NETWORK PREPARATION
 ########################################################################################################################
 #---- 6. Assign reaches to basin for each level, project them, and create geometric network ----
-#Create feature dataset
-#pr.XYTolerance = 0.01
-if not arcpy.Exists(netftdat):
-    arcpy.CreateFeatureDataset_management(dcigdb, os.path.split(netftdat)[1], crsSIRGAS) #pr
-#arcpy.Describe(netftdat).SpatialReference.XYTolerance
+#Get geodesic length of full reaches prior to intersecting with basins
+if not 'LENGTH_GEOFULL' in [f.name for f in arcpy.ListFields(snbr_clean)]:
+    arcpy.AddGeometryAttributes_management(snbr_clean, 'LENGTH_GEODESIC', Length_Unit = "METERS")
+    arcpy.AlterField_management(snbr_clean, 'LENGTH_GEO', new_field_name='LENGTH_GEOFULL', new_field_alias = 'LENGTH_GEOFULL')
 
 #For each level
-for level in blevels:
-    #Intersect stream reaches with basins at multiple levels, leading to some reaches being divided in multiple segments
-    basinnocoast = os.path.join(dcigdb, "BasinATLAS_lev{}_v01_br_NonCoastalproj".format(level))
-    outsn = os.path.join(dcigdb, 'streamATLAS_intersect_level{}'.format(level))
-    if not arcpy.Exists(outsn):
-        print('Intersecting stream network with {}'.format(basinnocoast))
-        arcpy.Intersect_analysis([snbr_clean, basinnocoast], out_feature_class= outsn, join_attributes='ALL')
-    else:
-        print('{} already exists. Skipping...'.format(outsn))
+#for level in blevels:
+level = '08'
+print('Preparing network for level {}'.format(level))
+#Intersect stream reaches with basins at multiple levels, leading to some reaches being divided in multiple segments
+basinbrproj = os.path.join(dcigdb, "BasinATLAS_lev{}_v01_brproj".format(level))
+outsn = os.path.join(dcigdb, 'streamATLAS_intersect_level{}'.format(level))
 
-    ###Assign basin that reaches overlaps the most to all subsegments of reach
-    #Identify basin that each reach overlaps the most with
-    basoverlap = defaultdict(list)
-    for row in arcpy.da.SearchCursor(outsn, ['REACH_ID', 'Shape_Length', 'HYBAS_ID']):
+if not arcpy.Exists(outsn):
+    print('Intersecting stream network with {}'.format(basinbrproj))
+    arcpy.Intersect_analysis([snbr_clean, basinbrproj], out_feature_class=outsn, join_attributes='ALL')
+else:
+    print('{} already exists. Skipping...'.format(outsn))
+
+arcpy.AddGeometryAttributes_management(outsn, 'LENGTH_GEODESIC', Length_Unit = 'METERS')
+
+###Assign basin that reaches overlaps the most to all subsegments of reach
+#Identify basin that each reach overlaps the most with and compute # of intersecting basins
+basoverlap = defaultdict(list) #Output: [length of subsegment, HYBAS_ID, # of intersecting basins]
+for row in arcpy.da.SearchCursor(outsn, ['REACH_ID', 'LENGTH_GEO', 'HYBAS_ID']):
+    if row[0] in basoverlap:
+        basoverlap[row[0]][2] += 1 #Add 1 to number of intersecting basins
+        if row[1] > basoverlap[row[0]][0]:
+            basoverlap[row[0]][0] = row[1]
+            basoverlap[row[0]][1] = row[2]
+    else:
+        basoverlap[row[0]] = [row[1], row[2], 1]
+
+#Assign it to the original stream network
+arcpy.AddField_management(in_table = snbr_clean, field_name = 'HYBAS_ID{}'.format(level),
+                          field_type=[f.type for f in arcpy.ListFields(outsn) if f.name == 'HYBAS_ID'][0])
+with arcpy.da.UpdateCursor(snbr_clean, ['REACH_ID', 'LENGTH_GEOFULL', 'HYBAS_ID{}'.format(level)]) as cursor:
+    for row in cursor:
         if row[0] in basoverlap:
-            if row[1] > basoverlap[row[0]][0]:
-                basoverlap[row[0]] = [row[1], row[2]]
-        else:
-            basoverlap[row[0]] = [row[1], row[2]]
-    #Assign it to the original stream network
-    arcpy.AddField_management(in_table = snbr_clean, field_name = 'HYBAS_ID{}'.format(level),
-                              field_type=[f.type for f in arcpy.ListFields(outsn) if f.name == 'HYBAS_ID'][0])
-    with arcpy.da.UpdateCursor(snbr_clean, ['REACH_ID', 'HYBAS_ID{}'.format(level)]) as cursor:
-        for row in cursor:
-            if row[0] in basoverlap:
-                row[1] = basoverlap[row[0]][1]
+            #Delete segments that only intersect one basin within brazil and are not fully contained within it
+            #(deals with stubs that flow to basins outside of Brazil)
+            if (basoverlap[row[0]][2] == 1 and round(basoverlap[row[0]][0],1) < round(row[1],1)):
+                #row[2] = '-999.999'
+                cursor.deleteRow()
+            else:
+                row[2] = basoverlap[row[0]][1]
                 cursor.updateRow(row)
 
 #----------------------------- Split network at dams -------------------------------------
-if not arcpy.Exists(outsnsplit):
-    print('Split stream segments where dams intersect them...')
-    arcpy.SplitLineAtPoint_management(snbr_clean, damsnap_edit, outsnsplit, search_radius= '0.1 Meters')
-
-#-------------- Edit dams that fall on the start node (upstream edge) of 1st order streams ------------------------------------------
-#Find dangle points
-arcpy.FeatureVerticesToPoints_management(outsnsplit, '{}_vertices'.format(outsnsplit), point_location= 'DANGLE')
-
-#Intersect
-dangledam = os.path.join(dcigdb, 'damdangle_inters')
-arcpy.Intersect_analysis(['{}_vertices'.format(outsnsplit), damsnap_edit], dangledam,
-                         join_attributes='ALL')
-
-#Make list of dam-line pairs
-damlinedict = dict([(row[0], row[1]) for row in arcpy.da.SearchCursor(dangledam, ['SUBREACH_ID', 'DAMID'])])
-
-#Shift dam down line
-min([row[0] for row in arcpy.da.SearchCursor(dangledam, ['LENGTH'])]) #Check length of lines that dams sit on
-#Get position of point intersection of 50-m buffer around point with line
-dangledambuf = os.path.join(dcigdb, 'damdangle_buf')
-arcpy.Buffer_analysis(dangledam, dangledambuf, '50 meters')
-dangledambufline = os.path.join(dcigdb, 'damdangle_bufline')
-arcpy.FeatureToLine_management(dangledambuf, dangledambufline, attributes='ATTRIBUTES')
-dangledambufinters = os.path.join(dcigdb, 'damdangle_bufpoint')
-arcpy.Intersect_analysis([outsnsplit, dangledambufline], dangledambufinters, output_type='POINT', join_attributes='ALL')
-#Get XY coordinates of intersection of the buffer with the line that the dam sits on (rather than potentially other nearby line)
-damlineshiftdict = dict([(row[2], row[3]) for row in
-                         arcpy.da.SearchCursor(dangledambufinters, ['SUBREACH_ID', 'SUBREACH_ID_1', 'DAMID', 'SHAPE@XY'])
-                         if row[0] == row[1]])
-#Edit dam layer to shift dams
-with arcpy.da.UpdateCursor(damsnap_edit, ['DAMID', 'SHAPE@XY']) as cursor:
-    for row in cursor:
-        if row[0] in damlineshiftdict:
-            row[1] = damlineshiftdict[row[0]]
-            cursor.updateRow(row)
-
-#----------------------------- Split network at dams again -------------------------------------
-if not arcpy.Exists(outsnsplit):
-    print('Split stream segments where dams intersect them...')
-    arcpy.SplitLineAtPoint_management(snbr_clean, damsnap_edit, outsnsplit, search_radius= '0.001 Meters')
+print('Split stream segments where dams intersect them...')
+arcpy.SplitLineAtPoint_management(snbr_clean, damsnap_editclean, outsnsplit, search_radius= '0.1 Meters')
 
 #Create new unique id for each segment in network
 outfield = 'SUBREACH_ID'
@@ -338,11 +336,66 @@ with arcpy.da.UpdateCursor(outsnsplit, [outfield]) as cursor:
         i += 1
 
 edit.stopEditing(True)
+
+#-------------- Edit dams that fall on the start node (upstream edge) of 1st order streams ------------------------------------------
+#Find dangle points
+print('Feature vertices to points...')
+arcpy.FeatureVerticesToPoints_management(outsnsplit, '{}_vertices'.format(outsnsplit), point_location= 'DANGLE')
+
+#Intersect
+print('Intersect network vertices with dams...')
+dangledam = os.path.join(dcigdb, 'damdangle_inters')
+arcpy.Intersect_analysis(['{}_vertices'.format(outsnsplit), damsnap_editclean], dangledam,
+                         join_attributes='ALL')
+
+#Make list of dam-line pairs
+damlinedict = dict([(row[0], row[1]) for row in arcpy.da.SearchCursor(dangledam, ['SUBREACH_ID', 'DAMID'])])
+
+#Shift dam down line
+min([row[0] for row in arcpy.da.SearchCursor(dangledam, ['LENGTH_GEO'])]) #Check length of lines that dams sit on
+#Get position of point intersection of 50-m buffer around point with line
+dangledambuf = os.path.join(dcigdb, 'damdangle_buf')
+arcpy.Buffer_analysis(dangledam, dangledambuf, '50 meters')
+dangledambufline = os.path.join(dcigdb, 'damdangle_bufline')
+arcpy.FeatureToLine_management(dangledambuf, dangledambufline, attributes='ATTRIBUTES')
+dangledambufinters = os.path.join(dcigdb, 'damdangle_bufpoint')
+arcpy.Intersect_analysis([outsnsplit, dangledambufline], dangledambufinters, output_type='POINT', join_attributes='ALL')
+#Get XY coordinates of intersection of the buffer with the line that the dam sits on (rather than potentially other nearby line)
+damlineshiftdict = dict([(row[2], row[3]) for row in
+                         arcpy.da.SearchCursor(dangledambufinters, ['SUBREACH_ID', 'SUBREACH_ID_1', 'DAMID', 'SHAPE@XY'])
+                         if row[0] == row[1]])
+#Edit dam layer to shift dams
+with arcpy.da.UpdateCursor(damsnap_editclean, ['DAMID', 'SHAPE@XY']) as cursor:
+    for row in cursor:
+        if row[0] in damlineshiftdict:
+            row[1] = damlineshiftdict[row[0]]
+            cursor.updateRow(row)
+
+#----------------------------- Split network at dams again -------------------------------------
+print('Split stream segments where dams intersect them...')
+arcpy.SplitLineAtPoint_management(snbr_clean, damsnap_editclean, outsnsplit, search_radius= '0.001 Meters')
+
+#Create new unique id for each segment in network
+outfield = 'SUBREACH_ID'
+flist = [f.name for f in arcpy.ListFields(outsnsplit)]
+if outfield not in flist:
+    print('Create SUBREACH_ID field...')
+    arcpy.AddField_management(outsnsplit, outfield, 'LONG')
+
+edit.startEditing(False, True)
+print('Compute SUBREACH_ID field...')
+i=0
+with arcpy.da.UpdateCursor(outsnsplit, [outfield]) as cursor:
+    for row in cursor:
+        row[0] = i
+        cursor.updateRow(row)
+        i += 1
+edit.stopEditing(True)
+
 #Compute segment length
 if 'LENGTH' not in flist:
     print('Compute segment length...')
     arcpy.AddGeometryAttributes_management(outsnsplit, 'LENGTH', 'meters')
-    "DElete first"
 
 #----------------------------- Create geometric network -------------------------------------
 in_source_feature_classes = "{} SIMPLE_EDGE NO".format(os.path.split(outsnsplit)[1])
@@ -355,6 +408,7 @@ else:
 ########################################################################################################################
 # DCI ANALYSIS
 ########################################################################################################################
+
 #Set flow direction of geometric network, a pre-requisite for tracing
 arcpy.SetFlowDirection_management(geonetout, flow_option = "WITH_DIGITIZED_DIRECTION")
 
@@ -373,7 +427,7 @@ with arcpy.da.SearchCursor(netp, ['SUBREACH_ID', 'SHAPE@']) as cursor:
             #Select all connected reaches using dams a barriers (this includes stopping reaches where dam is though)
             arcpy.TraceGeometricNetwork_management(in_geometric_network= geonetout,
                                                    out_network_layer = "connectlyr",
-                                                   in_flags = row[1], in_barriers= damsnap_edit,
+                                                   in_flags = row[1], in_barriers= damsnap_editclean,
                                                    in_trace_task_type= "FIND_CONNECTED",
                                                    in_trace_ends = 'NO_TRACE_ENDS')
             connect_tr = "connectlyr/{}".format(os.path.split(outsnsplit)[1])
@@ -381,7 +435,7 @@ with arcpy.da.SearchCursor(netp, ['SUBREACH_ID', 'SHAPE@']) as cursor:
             #Add reaches with barriers on them that are connected
             arcpy.TraceGeometricNetwork_management(in_geometric_network= geonetout,
                                                    out_network_layer = "connectstoplyr",
-                                                   in_flags = row[1], in_barriers=damsnap_edit,
+                                                   in_flags = row[1], in_barriers=damsnap_editclean,
                                                    in_trace_task_type= "FIND_CONNECTED",
                                                    in_trace_ends = 'TRACE_ENDS')
             connectstop_tr = "connectstoplyr/{}".format(os.path.split(outsnsplit)[1])
@@ -406,10 +460,10 @@ with arcpy.da.SearchCursor(netp, ['SUBREACH_ID', 'SHAPE@']) as cursor:
 invsegdic = {v: k for k, vall in segdic.iteritems() for v in vall}
 
 # #### In case one wants to save dictionary to file
-# import cPickle as pickle
-# outpickle = os.path.join(resdir, 'invsegdic')
-# pickle.dump(invsegdic, open(outpickle, "wb" ) )
-# invsegdic = pickle.load(open(outpickle, "rb" ) )
+import cPickle as pickle
+outpickle = os.path.join(resdir, 'invsegdic')
+pickle.dump(invsegdic, open(outpickle, "wb" ) )
+invsegdic = pickle.load(open(outpickle, "rb" ) )
 
 #Assign segment ID to each reach in network
 print('Assign segment ID to reach reach...')
@@ -435,13 +489,11 @@ arcpy.FeatureVerticesToPoints_management(net_diss, netdanglep, point_location='D
 arcpy.FeatureVerticesToPoints_management(net_diss, netendp, point_location='END')
 
 #Dictionary containing rounded coordinates and corresponding SEGID for start vertex of every segment (to identify downstream segments)
-
 ########
 #Future edit: Exclude dangle points to avoid errors when dams are too close to the start vertex of first order stream (e.g. D1430 Ipueiras)
 #However, issues of resolution/tolerance made a point lower down a dangle in this case. Not sure how to solve. Correct manually in R code
 #danglepset = {(round(row[0].centroid.X, 1), round(row[0].centroid.Y, 1)) for row in arcpy.da.SearchCursor(netdanglep, ['SHAPE@'])}
 ####
-
 firstpdict = defaultdict(list)
 for row in arcpy.da.SearchCursor(netp, ['SHAPE@', 'SUBREACH_ID']):
     outcoor = (round(row[0].centroid.X, 1), round(row[0].centroid.Y, 1))
@@ -454,18 +506,18 @@ for row in arcpy.da.SearchCursor(netendp, ['SHAPE@', 'SEGID']):
     lastpdict[(round(row[0].centroid.X, 1), round(row[0].centroid.Y, 1))].append(row[1])
 
 #Create UpSeg and DownSeg fields
-damfieldlist = [f.name for f in arcpy.ListFields(damsnap_edit)]
+damfieldlist = [f.name for f in arcpy.ListFields(damsnap_editclean)]
 if 'UpSeg' not in damfieldlist:
-    arcpy.AddField_management(damsnap_edit, 'UpSeg', 'LONG')
+    arcpy.AddField_management(damsnap_editclean, 'UpSeg', 'LONG')
 if 'downSeg' not in damfieldlist:
-    arcpy.AddField_management(damsnap_edit, 'DownSeg', 'LONG')
+    arcpy.AddField_management(damsnap_editclean, 'DownSeg', 'LONG')
 
 #Assign UpSeg and DownSeg for each dam by overlapping it with start and end vertices
 #Manual corrections that can be improved upon automatically in later edits
 bugdictstart = {}
 bugdictstart['D1430'] = 1779
 
-with arcpy.da.UpdateCursor(damsnap_edit, ['SHAPE@', 'DownSeg', 'UpSeg', 'DAMID']) as cursor:
+with arcpy.da.UpdateCursor(damsnap_editclean, ['SHAPE@', 'DownSeg', 'UpSeg', 'DAMID']) as cursor:
     for row in cursor:
         rowp = (round(row[0].centroid.X, 1), round(row[0].centroid.Y, 1))
         if rowp in firstpdict.keys():
@@ -479,7 +531,7 @@ with arcpy.da.UpdateCursor(damsnap_edit, ['SHAPE@', 'DownSeg', 'UpSeg', 'DAMID']
         cursor.updateRow(row)
 
 #Spatial join dams to network to get SUBREACH_ID
-arcpy.SpatialJoin_analysis(damsnap_edit, outsnsplit, damsnap_join, join_operation='JOIN_ONE_TO_ONE',
+arcpy.SpatialJoin_analysis(damsnap_editclean, outsnsplit, damsnap_join, join_operation='JOIN_ONE_TO_ONE',
                            match_option = 'INTERSECT', search_radius = '0.001 meters')
 
 #Export dam and network attributes to tables
