@@ -14,12 +14,12 @@ arcpy.env.XYResolution = "0.001 meters"
 arcpy.env.XYTolerance = "0.001 meters"
 
 #Input data and variables
-rootdir = 'F:/Mathis/brazilDCI'
+rootdir = os.path.dirname(os.path.abspath(__file__)).split('\\src')[0]
 blevels = ['04', '06', '08', '10']
 datadir = os.path.join(rootdir, 'data')
 resdir = os.path.join(rootdir, 'results')
 crsSIRGAS = arcpy.SpatialReference(5880) #SIRGAS_2000_Brazil_Polyconic (ESPG: 5880)
-streamatlas = os.path.join(datadir, 'HydroATLAS/StreamATLAS_v01.gdb/StreamATLAS_v01')
+streamatlas = os.path.join(datadir, 'HydroATLAS/RiverATLAS_v10.gdb/RiverATLAS_v10')
 br_admin = os.path.join(datadir, 'ibge/BR/BRUFE250GC_SIR.shp')
 
 #Output variables
@@ -40,7 +40,7 @@ geonetini = os.path.join(netftdat, 'streamATLAS_geonet_ini')
 snbr_trim = os.path.join(dcigdb, 'streamATLAS_Brazil_startsplit_trim')
 snbr_clean = os.path.join(dcigdb,'streamATLAS_Brazil_clean')
 
-basinbr4 = os.path.join(dcigdb, "BasinATLAS_lev04_v01_br")
+basinbr4 = os.path.join(dcigdb, "BasinATLAS_lev04_v10_br")
 netproj4 = os.path.join(netftdat, 'streamATLAS_proj_level04')
 netproj10 = os.path.join(netftdat, 'streamATLAS_proj_level10')
 geonet4 = os.path.join(netftdat, 'streamATLAS_geonet_level4')
@@ -48,13 +48,14 @@ geonet10 = os.path.join(netftdat, 'streamATLAS_geonet_level10')
 
 dams_original = os.path.join(datadir, 'DamsBrazil/Aproveitamento_Hidrelétricos_AHE.shp')
 dams_originalgdb = os.path.join(dcigdb, 'Aproveitamento_Hidreletricos_AHE')
+damsel = os.path.join(dcigdb, 'damfull_simplified_300m')
 damsbuf300 = os.path.join(dcigdb, 'damsbuf300')
 damsbufinter = os.path.join(dcigdb, 'damsbufinter')
-damsel = os.path.join(dcigdb, 'damfull_simplified_300m')
 damsnap = os.path.join(dcigdb, 'damfull_snapped')
+damsnap_join = os.path.join(dcigdb, 'damfull_snappedjoin')
 damsnap_edit = os.path.join(dcigdb, 'damfull_snappededit')
 damsnap_editclean = os.path.join(dcigdb, 'damfull_snappededitclean')
-damsnap_join = os.path.join(dcigdb, 'damfull_join')
+damsnap_editcleanjoin = os.path.join(dcigdb, 'damfull_join')
 
 outsnsplit = os.path.join(netftdat, 'streamATLAS_split')
 geonetout = os.path.join(netftdat,'streamATLAS_geonet')
@@ -78,7 +79,7 @@ arcpy.Dissolve_management(br_admin, br_bound)
 
 for level in blevels:
     #---- Filter basins and rivers of Brazil ----
-    basin = os.path.join(datadir, "HydroATLAS/BasinATLAS_v01.gdb/BasinATLAS_lev{}_v01".format(level))
+    basin = os.path.join(datadir, "HydroATLAS/BasinATLAS_v10.gdb/BasinATLAS_lev{}_v10".format(level))
     basinbr = os.path.join(dcigdb, "{}_br".format(os.path.split(basin)[1]))
     basinbrinter = os.path.join(dcigdb, "{}_brinter".format(os.path.split(basin)[1]))
     basinbrproj = basinbr + 'proj'
@@ -182,7 +183,7 @@ arcpy.Dissolve_management(snbr_trim, snbr_clean, dissolve_field = 'REACH_ID')
 #Create unique dam ID
 print('Create unique dam ID...')
 arcpy.AddField_management(dams_originalgdb, 'DAMID', 'TEXT')
-with arcpy.da.UpdateCursor(dams_originalgdb, [arcpy.Describe(damsel).OIDFieldName, 'DAMID']) as cursor:
+with arcpy.da.UpdateCursor(dams_originalgdb, [arcpy.Describe(dams_originalgdb).OIDFieldName, 'DAMID']) as cursor:
     for row in cursor:
         row[1] = 'D{}'.format(row[0])
         cursor.updateRow(row)
@@ -228,16 +229,27 @@ snap_env = [snbr_clean, "EDGE", "200 Meters"]
 arcpy.Snap_edit(damsnap, [snap_env])
 
 #Compare dam size with modelled discharge of stream it was snapped to
-arcpy.SpatialJoin_analysis(damsnap, streamatlas, damsnap_edit, join_operation= 'JOIN_ONE_TO_ONE',
+arcpy.SpatialJoin_analysis(damsnap, streamatlas, damsnap_join, join_operation= 'JOIN_ONE_TO_ONE',
                            join_type = 'KEEP_ALL', match_option = 'INTERSECT', search_radius = '10 meters')
-arcpy.AddField_management(damsnap_edit, 'KWTOQ', 'FLOAT')
-arcpy.CalculateField_management(damsnap_edit, 'KWTOQ', '!POT_KW!/!dis_m3_pyr!', expression_type= 'PYTHON')
+arcpy.AddField_management(damsnap_join, 'KWTOQ', 'FLOAT')
+arcpy.CalculateField_management(damsnap_join, 'KWTOQ', '!POT_KW!/!dis_m3_pyr!', expression_type= 'PYTHON')
 
+#Compare drainage areas between the dam database and that obtained with HydroSHEDS
+arcpy.AddField_management(damsnap_join, 'DRENCOMP', 'FLOAT')
+arcpy.CalculateField_management(damsnap_join, 'DRENCOMP', '!AREA_DREN!/!UPLAND_SKM!', expression_type= 'PYTHON')
+
+#Copy dams to edit manually - perform all edits on damsnap_edit
+arcpy.CopyFeatures_management(damsnap_join, os.path.join(datadir, damsnap_edit))
 #Check those dams 200-500 m from river network with imagery and water mask, large hydropower (Tipo_1 = UHE), and those with high/low KWTOQ.
 #Either move them to the network or delete them.
 #Create field to know whether dam was checked and edited (1) or not edited (0), otherwise (if not checked) 'null'
 arcpy.AddField_management(damsnap_edit, 'manualsnap', 'TEXT')
 arcpy.AddField_management(damsnap_edit, 'comment', 'TEXT')
+
+#For dams in operation, the location of a dam, reservoir, or plant was the primary criterion of placement.
+#In the absence of visible structure in the vicinity...etc.
+#The authors estimate that the majority of mismatches are due either to an inaccurate calculation of drainage area or
+#imprecise or inaccurate coordinates in the ANEEL database.
 
 #For large KWTOQ ratio (> 1000 electricty production (KW)/ annual average discharge (m3/s), 500 dams:
     #Make sure that dam wasn't snapped to smaller tributary
@@ -250,6 +262,12 @@ arcpy.AddField_management(damsnap_edit, 'comment', 'TEXT')
     #  original point sits on top of watercourse in imagery and/or brazilian hydrography
     # when in doubt, make sure that river name matches
 #Check every dam > 30000 KW
+
+#Check every dam that has DRENCOMP > 1.25 or DRENCOMP < 0.75
+#Even when dam was topologically placed the same way in the network as on the national river network, we moved points
+#to places where there was an obvious correspondence to the reported drainage area in the database (moved past or up a confluence, from tributary to mainstem, etc.).
+#Many instances when drainage area did not match but the dam was topologically well places, there no stream in the
+# surrounding area matching drainage area, often a reservoir or obvious waterfall sites was visible.
 
 #Make a copy of damsnap_edit to avoid deleting by mistake
 arcpy.CopyFeatures_management(damsnap_edit, os.path.join(datadir, damsnap_edit + 'copy'))
@@ -277,7 +295,7 @@ if not 'LENGTH_GEOFULL' in [f.name for f in arcpy.ListFields(snbr_clean)]:
 level = '08'
 print('Preparing network for level {}'.format(level))
 #Intersect stream reaches with basins at multiple levels, leading to some reaches being divided in multiple segments
-basinbrproj = os.path.join(dcigdb, "BasinATLAS_lev{}_v01_brproj".format(level))
+basinbrproj = os.path.join(dcigdb, "BasinATLAS_lev{}_v10_brproj".format(level))
 outsn = os.path.join(dcigdb, 'streamATLAS_intersect_level{}'.format(level))
 
 if not arcpy.Exists(outsn):
@@ -352,10 +370,10 @@ arcpy.Intersect_analysis(['{}_vertices'.format(outsnsplit), damsnap_editclean], 
 damlinedict = dict([(row[0], row[1]) for row in arcpy.da.SearchCursor(dangledam, ['SUBREACH_ID', 'DAMID'])])
 
 #Shift dam down line
-min([row[0] for row in arcpy.da.SearchCursor(dangledam, ['LENGTH_GEO'])]) #Check length of lines that dams sit on
-#Get position of point intersection of 50-m buffer around point with line
+min([row[0] for row in arcpy.da.SearchCursor(dangledam, ['LENGTH_GEOFULL'])]) #Check length of lines that dams sit on
+#Get position of point intersection of 200-m buffer around point with line
 dangledambuf = os.path.join(dcigdb, 'damdangle_buf')
-arcpy.Buffer_analysis(dangledam, dangledambuf, '50 meters')
+arcpy.Buffer_analysis(dangledam, dangledambuf, '200 meters')
 dangledambufline = os.path.join(dcigdb, 'damdangle_bufline')
 arcpy.FeatureToLine_management(dangledambuf, dangledambufline, attributes='ATTRIBUTES')
 dangledambufinters = os.path.join(dcigdb, 'damdangle_bufpoint')
@@ -373,7 +391,7 @@ with arcpy.da.UpdateCursor(damsnap_editclean, ['DAMID', 'SHAPE@XY']) as cursor:
 
 #----------------------------- Split network at dams again -------------------------------------
 print('Split stream segments where dams intersect them...')
-arcpy.SplitLineAtPoint_management(snbr_clean, damsnap_editclean, outsnsplit, search_radius= '0.001 Meters')
+arcpy.SplitLineAtPoint_management(snbr_clean, damsnap_editclean, outsnsplit, search_radius= '0.010 Meters')
 
 #Create new unique id for each segment in network
 outfield = 'SUBREACH_ID'
@@ -408,7 +426,6 @@ else:
 ########################################################################################################################
 # DCI ANALYSIS
 ########################################################################################################################
-
 #Set flow direction of geometric network, a pre-requisite for tracing
 arcpy.SetFlowDirection_management(geonetout, flow_option = "WITH_DIGITIZED_DIRECTION")
 
@@ -515,7 +532,6 @@ if 'downSeg' not in damfieldlist:
 #Assign UpSeg and DownSeg for each dam by overlapping it with start and end vertices
 #Manual corrections that can be improved upon automatically in later edits
 bugdictstart = {}
-bugdictstart['D1430'] = 1779
 
 with arcpy.da.UpdateCursor(damsnap_editclean, ['SHAPE@', 'DownSeg', 'UpSeg', 'DAMID']) as cursor:
     for row in cursor:
@@ -531,94 +547,20 @@ with arcpy.da.UpdateCursor(damsnap_editclean, ['SHAPE@', 'DownSeg', 'UpSeg', 'DA
         cursor.updateRow(row)
 
 #Spatial join dams to network to get SUBREACH_ID
-arcpy.SpatialJoin_analysis(damsnap_editclean, outsnsplit, damsnap_join, join_operation='JOIN_ONE_TO_ONE',
+print('Spatial join dam to network datasets')
+arcpy.SpatialJoin_analysis(damsnap_editclean, outsnsplit, damsnap_editcleanjoin, join_operation='JOIN_ONE_TO_ONE',
                            match_option = 'INTERSECT', search_radius = '0.001 meters')
 
+#Recreate unique DAMID as manual edits created some duplicates (shouldn't occur when re-running code/edits)
+with arcpy.da.UpdateCursor(damsnap_editcleanjoin, [arcpy.Describe(damsnap_editcleanjoin).OIDFieldName, 'DAMID']) as cursor:
+    for row in cursor:
+        row[1] = 'D{}'.format(row[0])
+        cursor.updateRow(row)
+
+#Add X and Y to dams (in WGS84)
+arcpy.AddGeometryAttributes_management(Input_Features=damsnap_editcleanjoin, Geometry_Properties=['POINT_X_Y_Z_M'],
+                                       Coordinate_System=arcpy.SpatialReference(4326))
+
 #Export dam and network attributes to tables
-arcpy.CopyRows_management(damsnap_join, dam_tab)
+arcpy.CopyRows_management(damsnap_editcleanjoin, dam_tab)
 arcpy.CopyRows_management(net_diss, netseg_tab)
-
-########################################################################################################################
-# EXTRA STUFF BY MATHIS
-########################################################################################################################
-# #Dissolve network by HYBAS_ID
-# arcpy.env.workspace = dcigdb
-# [f.name for f in arcpy.ListFields(netsub)]
-# arcpy.Dissolve_management(netsub, 'netsubdiss', dissolve_field='PFAF_ID', statistics_fields=[['LENGTH_GEO', 'SUM']],
-#                           multi_part='MULTI_PART', unsplit_lines='DISSOLVE_LINES')
-#
-
-#### Delete upstream stream segments that dangle in adjacent basin after intersecting
-    # splitdic = defaultdict(int)
-    # reachnumbas = defaultdict(int)
-    # for row in arcpy.da.SearchCursor(outsn, ['REACH_ID', 'HYBAS_ID']):
-    #     splitdic[row[0]] += 1 #Identify reaches that were split when intersecting with basins (as > 1 feature with same REACH_ID)
-    #     reachnumbas[row[1]] += 1 #Count number of reaches per basin
-    #
-    # arcpy.FeatureVerticesToPoints_management(outsn, '{}_vertices'.format(outsn), point_location= 'DANGLE')
-    # #Get ID of all streams with dangle points if at least one dangle point is > 0.36 km from mouth (half diagonal of a pixel)
-    # #and if more than one line in basin (if not, it's just that this is the only stream segment which starts and end basin)
-    # dangledict = {}
-    # for row in arcpy.da.SearchCursor('{}_vertices'.format(outsn), ['REACH_ID', 'ORIG_FID', 'rld_km_pva', 'HYBAS_ID']):
-    #     if row[2] > 0.36 and reachnumbas[row[3]]>1:
-    #         dangledict[row[0]] = row[1]
-    #
-    # dellist = []
-    # with arcpy.da.UpdateCursor(outsn, ['REACH_ID', arcpy.Describe(outsn).OIDFieldName, 'Shape_Length']) as cursor:
-    #     for row in cursor:
-    #         if splitdic[row[0]] > 1: #If reach was split
-    #             if (row[0] in dangledict and row[1] == dangledict[row[0]]) or row[2] < 0.05: #And reach segment has a danglepoint or is less than 50 meters (to get those that cross corners)
-    #                 dellist.append(row[1])
-    #
-    # #dellist = [dangledict[k] for k,v in splitdic.iteritems() if v == 2 and k in dangledict]
-    # arcpy.MakeFeatureLayer_management(outsn, 'updangle',
-    #                                   '{0} IN {1}'.format(arcpy.Describe(outsn).OIDFieldName, str(tuple(dellist))))
-    # arcpy.CopyFeatures_management('updangle', os.path.join(dcigdb, 'check'))
-    #
-    #
-    # for row in arcpy.da.UpdateCursor(outsn, ['REACH_ID'])
-    #
-    #
-    # duplilist = [id for id in [row[0] for row in arcpy.da.SearchCursor(outsn, ['REACH_ID'])]]
-    #
-
-########################################################################################################################
-# EXTRA STUFF FOR BAT ANALYSIS
-########################################################################################################################
-
-################# NETWORK PREPARATION #####################
-#---- 10. Export data of “streamATLAS_ proj_LevelXX.shp” to a layer to be modified by BAT
-#a.	“BAT_network_Level08.shp”
-#b.	“BAT_network_Level06.shp”
-#c.	“BAT_network_Level04.shp”
-#d.	“BAT_network_Level10.shp”
-
-#----11) Create a column with basin IDs to run in BAT (RegionX). It should be a string (text field).
-#  Use the field calculator to fill out the column with the HYBAS_ID.
-# a.	“BAT_network_Level08.shp”
-# b.	“BAT_network_Level06.shp”
-# c.	“BAT_network_Level04.shp”
-# d.	“BAT_network_Level10.shp”
-
-#----12)	Optimize the analysis only running it for basins with dams.
-# First, select manually the basins that have multiple networks (Coastal drainages) in the Level 4.
-# Save as the layer as “BasinATLAS_level04_Brazil_NonCoastal.shp”, which will be used for removing the coastal
-# drainages from all the other levels (keep the same basins for comparison). Second, select the basins with no
-# coastal drainages using the “Select by Location” and the raw BasinATLAS for all levels as the target.
-# se the source: “BasinATLAS_level04_Brazil_NonCoastal”. Export data and save all these resulting layers as
-#  “BasinATLAS_levelXX_Brazil_NonCoastal.shp”.
-# Third, use the “Select by location” on the “BasinATLAS_levelXX_Brazil_NonCoastal” layer and the source
-#  layer “DamAll_Proposed.shp”. Export data and save as “BasinsLX_WithDams.shp”.
-# Finally, clip the “BAT_network_LevelXX.shp” layer using the “BasinsLX_WithDams.shp” as the clipping feature.
-#a.	“BAT_networkX_WithDams.shp”
-
-# 13)	Export the data “BAT_networkX_WithDams.shp” for future edition by the BAT analysis
-# a.	“BAT_RUN_Net10.shp”
-# b.	“BAT_RUN_Net08.shp”
-# c.	“BAT_RUN_Net06.shp”
-# d.	“BAT_RUN_Net04.shp”
-
-################ DAM DATASET PREPARATION #####################
-# 17)	Remove coastal drainages from “DamFull_Simplified_debug_FINAL.shp”.
-# “Geoprocessing” -> “Clip”. Based on level04 ATLAS with non-coastal basins.
-# a.	“DammFull_Simplified_NonCoastal.shp”
