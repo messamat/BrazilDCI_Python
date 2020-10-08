@@ -15,9 +15,9 @@ The /data folder in the figshare repository contains raw data not currently avai
 the directory structure enables users to reproduce our study using the scripts herein.
 
 Additional sources of data to download prior to run this analysis include (folder to insert them in: link to data source):
-*/data/ibge/BR/BRUFE250GC_SIR.shp : from ftp://geoftp.ibge.gov.br/organizacao_do_territorio/malhas_territoriais/malhas_municipais/municipio_2018/Brasil/BR/
-*/data/HydroATLAS/RiverATLAS_v10.gdb/RiverATLAS_v10: from https://hydrosheds.org/page/hydroatlas (Linke et al. 2019)
-*/data/HydroATLAS/BasinATLAS_v10.gdb/BasinATLAS_lev0{4-8}_v10: from https://hydrosheds.org/page/hydroatlas (Linke et al. 2019)
+- */data/ibge/BR/BRUFE250GC_SIR.shp : from [ibge ftp]{ftp://geoftp.ibge.gov.br/organizacao_do_territorio/malhas_territoriais/malhas_municipais/municipio_2018/Brasil/BR/}  
+- */data/HydroATLAS/RiverATLAS_v10.gdb/RiverATLAS_v10: from [HydroSHEDS website]{https://hydrosheds.org/page/hydroatlas} (Linke et al. 2019)  
+- */data/HydroATLAS/BasinATLAS_v10.gdb/BasinATLAS_lev0{4-8}_v10: from [HydroSHEDS website]{https://hydrosheds.org/page/hydroatlas} (Linke et al. 2019)  
 
 ## Workflow
 */src/python/dci_format.py: 
