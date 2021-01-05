@@ -10,7 +10,7 @@ We used the Python Arcpy module associated with ArcGIS 10.5 in Python 2.7 with 6
 
 These scripts are annotated but could be challenging to follow. Please contact Mathis L. Messager for comments and clarifications. 
 
-Files needed to run this analysis are available by downloading the study's figshare permanent repository (add link).
+Files needed to run this analysis are available by downloading the study's [figshare permanent repository](https://figshare.com/s/5ba67b7f58ccc812ae70).
 The /data folder in the figshare repository contains raw data not currently available in the same form as was used in this study and 
 the directory structure enables users to reproduce our study using the scripts herein.
 
